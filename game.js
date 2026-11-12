@@ -3,7 +3,12 @@
 // כך שהחדר לא נעלם גם כשהמנהל יוצא לרגע מהאפליקציה (למשל כדי לשלוח קישור בוואטסאפ).
 
 const MIN_PLAYERS = 3;
-const BROKER = new URLSearchParams(location.search).get('broker') || 'wss://broker.emqx.io:8084/mqtt';
+const VERSION = 4;
+// כמה שרתי הודעות ציבוריים – אם אחד חסום או לא עובד, עוברים לבא בתור
+const BROKERS = new URLSearchParams(location.search).get('broker')
+  ? new URLSearchParams(location.search).get('broker').split(',')
+  : ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
+let brokerUrl = BROKERS[0];
 const TOPIC = (code) => 'mi-hamitchaze-il/v2/' + code;
 
 // ---------- מאגר מילים לגילאי 5–12 ----------
@@ -202,7 +207,7 @@ function pub(sub, obj, retain = true) {
 
 function connect(will) {
   if (client) { try { client.end(false); } catch (e) {} }
-  client = mqtt.connect(BROKER, {
+  client = mqtt.connect(brokerUrl, {
     clientId: 'mh_' + Math.random().toString(36).slice(2, 12), clean: true,
     reconnectPeriod: 1500, connectTimeout: 10000, keepalive: 20, will,
   });
@@ -217,17 +222,26 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------- מנהל ----------
-function createRoom(name, code, restored) {
+function createRoom(name, code, restored, bi = 0) {
+  if (bi >= BROKERS.length) {
+    const c0 = client; client = null; try { c0 && c0.end(true); } catch (e) {}
+    role = null; status = ''; S = null; sessionStorage.removeItem('imp_session');
+    err = 'לא הצלחתי להתחבר לשרת המשחק. בדקו שיש אינטרנט ונסו שוב (אפשר גם לנסות בלי WiFi, עם נתונים סלולריים).';
+    render(true); return;
+  }
   role = 'host';
   roomCode = code || String(1000 + rint(9000));
-  status = 'פותח חדר…'; err = ''; render(true);
+  brokerUrl = BROKERS[bi];
+  status = 'פותח חדר…' + (bi ? ` (ניסיון ${bi + 1})` : ''); err = ''; render(true);
   if (!restored) { S = newState(); actions.join(me, { name }); }
   S.hostId = me;
   const base = TOPIC(roomCode);
   const meta = (alive) => JSON.stringify({ roomId: S.roomId, alive, t: Date.now() });
   const c = connect({ topic: base + '/meta', payload: meta(false), qos: 1, retain: true });
   let checked = !!restored;
+  const failTimer = setTimeout(() => { if (!c.connected && client === c) { c.end(true); createRoom(name, roomCode, true, bi + 1); } }, 7000);
   c.on('connect', () => {
+    clearTimeout(failTimer);
     if (!checked) {
       // לוודא שהקוד לא תפוס ע"י חדר אחר
       let busy = false;
@@ -237,7 +251,7 @@ function createRoom(name, code, restored) {
         try { const m = JSON.parse(p.toString()); if (m.roomId !== S.roomId && Date.now() - m.t < 6 * 3600e3) busy = true; } catch (e) {}
       });
       setTimeout(() => {
-        if (busy) { c.end(true); client = null; createRoom(name, null, true); return; }
+        if (busy) { c.end(true); client = null; createRoom(name, null, true, bi); return; }
         checked = true; hostReady(c, base, meta);
       }, 1500);
     } else hostReady(c, base, meta);
@@ -260,7 +274,7 @@ function hostReady(c, base, meta) {
       try { const m = JSON.parse(s); hostAction(pid, m.action, m.body, m.seq); } catch (e) {}
     }
   });
-  sessionStorage.setItem('imp_session', JSON.stringify({ role: 'host', code: roomCode, name: S.players[me].name }));
+  sessionStorage.setItem('imp_session', JSON.stringify({ role: 'host', code: roomCode, name: S.players[me].name, broker: brokerUrl }));
   setUrl(roomCode);
   Object.keys(lastSent).forEach(k => delete lastSent[k]);
   broadcast();
@@ -270,16 +284,32 @@ function hostReady(c, base, meta) {
 // ---------- שחקן ----------
 function joinRoom(name, code) {
   role = 'guest'; roomCode = code; guestMeta = null;
-  status = 'מתחבר לחדר ' + code + '…'; err = ''; render(true);
+  status = 'מחפש את חדר ' + code + '…'; err = ''; render(true);
+  const probes = []; let done = false, anyConnected = false;
+  const finish = (url) => {
+    if (done) return; done = true; clearTimeout(timer);
+    probes.forEach(p => { try { p.end(true); } catch (e) {} });
+    if (role !== 'guest' || roomCode !== code) return;
+    if (url) { brokerUrl = url; joinOn(name, code); return; }
+    role = null; status = ''; sessionStorage.removeItem('imp_session');
+    err = anyConnected ? 'לא נמצא חדר עם הקוד ' + code + '. בדקו את הקוד.' : 'לא הצלחתי להתחבר לשרת המשחק. בדקו שיש אינטרנט ונסו שוב.';
+    render(true);
+  };
+  const timer = setTimeout(() => finish(null), 9000);
+  BROKERS.forEach(url => {
+    const p = mqtt.connect(url, { clientId: 'mhp_' + Math.random().toString(36).slice(2, 12), clean: true, reconnectPeriod: 0, connectTimeout: 8000 });
+    probes.push(p);
+    p.on('error', () => {});
+    p.on('connect', () => { anyConnected = true; p.subscribe(TOPIC(code) + '/meta', { qos: 1 }); });
+    p.on('message', (t, m) => { if (m.length) finish(url); });
+  });
+}
+
+function joinOn(name, code) {
+  status = 'מתחבר לחדר ' + code + '…'; render(true);
   const base = TOPIC(code);
   const c = connect({ topic: base + '/presence/' + me, payload: 'off', qos: 1, retain: true });
   sessionStorage.setItem('imp_session', JSON.stringify({ role: 'guest', code, name }));
-  clearTimeout(notFoundTimer);
-  notFoundTimer = setTimeout(() => {
-    if (role === 'guest' && !guestMeta && client && client.connected) {
-      leaveLocal(); err = 'לא נמצא חדר עם הקוד ' + code + '. בדקו את הקוד.'; render(true);
-    }
-  }, 7000);
   c.on('connect', () => {
     c.publish(base + '/presence/' + me, 'on', { qos: 1, retain: true });
     c.subscribe([base + '/meta', base + '/s/' + me], { qos: 1 });
@@ -405,7 +435,8 @@ function homeView() {
     <div class="note" style="margin:0">מי שפותח את החדר הוא המנהל. בזמן המשחק כדאי שהדף יישאר פתוח אצלו.</div>
     <button id="createBtn" class="green">✨ פתיחת חדר חדש</button>
   </div>
-  ${rulesPanel()}`;
+  ${rulesPanel()}
+  <div class="note">גרסה ${VERSION}</div>`;
 }
 
 function playersList(canKick) {
@@ -581,7 +612,7 @@ function bind() {
   try { sess = JSON.parse(sessionStorage.getItem('imp_session')); } catch (e) {}
   if (sess && sess.role === 'host') {
     let saved = null; try { saved = JSON.parse(localStorage.getItem('imp_host_state')); } catch (e) {}
-    if (saved && saved.code === sess.code && Date.now() - saved.t < 6 * 3600e3) { S = saved.S; createRoom(sess.name, sess.code, true); return; }
+    if (saved && saved.code === sess.code && Date.now() - saved.t < 6 * 3600e3) { S = saved.S; createRoom(sess.name, sess.code, true, Math.max(0, BROKERS.indexOf(sess.broker))); return; }
   }
   if (sess && sess.role === 'guest') { joinRoom(sess.name, sess.code); return; }
   render(true);
