@@ -1,8 +1,10 @@
 // מי המתחזה? – גרסת GitHub Pages
-// הטלפון של המנהל מחזיק את המשחק, ושאר הטלפונים מתחברים אליו ישירות (PeerJS).
+// הטלפון של המנהל מחזיק את המשחק. כל ההודעות עוברות דרך שרת MQTT ציבורי,
+// כך שהחדר לא נעלם גם כשהמנהל יוצא לרגע מהאפליקציה (למשל כדי לשלוח קישור בוואטסאפ).
 
 const MIN_PLAYERS = 3;
-const PREFIX = 'mi-hamitchaze-il-';
+const BROKER = new URLSearchParams(location.search).get('broker') || 'wss://broker.emqx.io:8084/mqtt';
+const TOPIC = (code) => 'mi-hamitchaze-il/v2/' + code;
 
 // ---------- מאגר מילים לגילאי 5–12 ----------
 const WORDS = {
@@ -24,18 +26,19 @@ if (!me) { me = Math.random().toString(36).slice(2) + Date.now().toString(36); l
 //                    לוגיקת המשחק (רצה אצל המנהל)
 // =====================================================================
 let S = null;            // מצב המשחק – קיים רק אצל המנהל
-const conns = new Map(); // conn -> playerId
+const presence = {};     // playerId -> true/false
 
 function newState() {
   return {
     players: {}, order: [], hostId: me, phase: 'lobby',
     settings: { hint: true, imposters: 1, category: 'הכול' },
     round: null, used: [], scores: {}, roundNo: 0,
+    roomId: Math.random().toString(36).slice(2, 10), seq: {}, errs: {},
   };
 }
 const rint = (n) => { const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] % n; };
 const shuffle = (a) => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = rint(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; };
-const isOnline = (id) => id === S.hostId || [...conns.values()].includes(id);
+const isOnline = (id) => id === S.hostId || presence[id] === true;
 const activeIds = () => S.order.filter(id => S.players[id]);
 
 function pickWord() {
@@ -99,7 +102,7 @@ const actions = {
   kick(id, b) {
     hostOnly(id); if (b.id === id) return;
     removePlayer(b.id);
-    for (const [c, pid] of conns) if (pid === b.id) { try { c.send({ type: 'kicked' }); } catch (e) {} setTimeout(() => c.close(), 300); }
+    pub('s/' + b.id, { roomId: S.roomId, kicked: true });
   },
   settings(id, b) {
     hostOnly(id);
@@ -125,6 +128,7 @@ const actions = {
 function view(pid) {
   const name = (id) => (S.players[id] ? S.players[id].name : '?');
   const out = {
+    roomId: S.roomId, ack: S.seq[pid] || 0, error: S.errs[pid] || null,
     me: pid, isHost: pid === S.hostId, joined: !!S.players[pid], phase: S.phase,
     players: activeIds().map(id => ({ id, name: name(id), online: isOnline(id), host: id === S.hostId, score: S.scores[id] || 0 })),
     settings: S.settings, categories: ['הכול', ...Object.keys(WORDS)], minPlayers: MIN_PLAYERS, roundNo: S.roundNo,
@@ -155,108 +159,193 @@ function view(pid) {
   return out;
 }
 
-function broadcast() {
+const lastSent = {};
+function broadcast(extra) {
   try { localStorage.setItem('imp_host_state', JSON.stringify({ code: roomCode, S, t: Date.now() })); } catch (e) {}
-  for (const [c, pid] of conns) if (pid && c.open) { try { c.send({ type: 'state', st: view(pid) }); } catch (e) {} }
+  if (client && client.connected) {
+    S.order.forEach(pid => {
+      if (pid === me || !S.players[pid]) return;
+      const v = JSON.stringify(view(pid));
+      if (lastSent[pid] !== v) { lastSent[pid] = v; client.publish(TOPIC(roomCode) + '/s/' + pid, v, { qos: 1, retain: true }); }
+    });
+  }
+  if (extra && !S.players[extra] && client && client.connected)
+    client.publish(TOPIC(roomCode) + '/s/' + extra, JSON.stringify(view(extra)), { qos: 1, retain: false });
   st = view(me); render(true);
 }
 
-function hostAction(pid, action, body, conn) {
+function hostAction(pid, action, body, seq) {
+  if (seq) { if (seq <= (S.seq[pid] || 0)) { delete lastSent[pid]; broadcast(pid); return; } S.seq[pid] = seq; }
   try {
     if (!actions[action]) throw 'פעולה לא קיימת';
     if (action !== 'join' && !S.players[pid]) throw 'צריך להצטרף קודם';
     actions[action](pid, body || {});
-    if (conn && action === 'join') conns.set(conn, pid);
-    broadcast();
+    delete S.errs[pid];
   } catch (e) {
     const msg = typeof e === 'string' ? e : 'שגיאה';
-    if (conn) { try { conn.send({ type: 'error', msg }); } catch (x) {} } else { err = msg; render(true); }
+    if (seq) S.errs[pid] = { seq, msg }; else { err = msg; }
   }
+  broadcast(pid);
 }
 
 // =====================================================================
-//                              רשת
+//                         רשת (MQTT)
 // =====================================================================
-let peer = null, hostConn = null, roomCode = null, role = null; // role: 'host' | 'guest'
+let client = null, roomCode = null, role = null; // role: 'host' | 'guest'
 let st = null, err = '', status = '', cardOpen = false, lastKey = '', lastRound = -1;
+let hostAlive = true, guestMeta = null, pending = null, resendTimer = null, notFoundTimer = null;
 const openDetails = new Set();
 
-function makePeer(id) {
-  return new Peer(id, { debug: 0 });
+function pub(sub, obj, retain = true) {
+  if (client) client.publish(TOPIC(roomCode) + '/' + sub, obj === '' ? '' : JSON.stringify(obj), { qos: 1, retain });
 }
 
+function connect(will) {
+  if (client) { try { client.end(false); } catch (e) {} }
+  client = mqtt.connect(BROKER, {
+    clientId: 'mh_' + Math.random().toString(36).slice(2, 12), clean: true,
+    reconnectPeriod: 1500, connectTimeout: 10000, keepalive: 20, will,
+  });
+  client.on('offline', () => { if (role) { status = 'אין חיבור לאינטרנט… מנסה שוב'; render(true); } });
+  client.on('error', () => {});
+  return client;
+}
+
+// אם הדף חזר מהרקע – מתחברים מחדש מיד
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && client && !client.connected) { try { client.reconnect(); } catch (e) {} }
+});
+
+// ---------- מנהל ----------
 function createRoom(name, code, restored) {
   role = 'host';
   roomCode = code || String(1000 + rint(9000));
-  status = 'יוצר חדר…'; render(true);
-  peer = makePeer(PREFIX + roomCode);
-  peer.on('open', () => {
-    status = '';
-    if (!restored) { S = newState(); actions.join(me, { name }); }
-    S.hostId = me;
-    sessionStorage.setItem('imp_session', JSON.stringify({ role: 'host', code: roomCode, name }));
-    history.replaceState(null, '', location.pathname + '?room=' + roomCode);
-    broadcast();
+  status = 'פותח חדר…'; err = ''; render(true);
+  if (!restored) { S = newState(); actions.join(me, { name }); }
+  S.hostId = me;
+  const base = TOPIC(roomCode);
+  const meta = (alive) => JSON.stringify({ roomId: S.roomId, alive, t: Date.now() });
+  const c = connect({ topic: base + '/meta', payload: meta(false), qos: 1, retain: true });
+  let checked = !!restored;
+  c.on('connect', () => {
+    if (!checked) {
+      // לוודא שהקוד לא תפוס ע"י חדר אחר
+      let busy = false;
+      c.subscribe(base + '/meta', { qos: 1 });
+      c.on('message', function chk(t, p) {
+        if (t !== base + '/meta' || !p.length) return;
+        try { const m = JSON.parse(p.toString()); if (m.roomId !== S.roomId && Date.now() - m.t < 6 * 3600e3) busy = true; } catch (e) {}
+      });
+      setTimeout(() => {
+        if (busy) { c.end(true); client = null; createRoom(name, null, true); return; }
+        checked = true; hostReady(c, base, meta);
+      }, 1500);
+    } else hostReady(c, base, meta);
   });
-  peer.on('connection', (c) => {
-    c.on('data', (d) => { if (d && d.type === 'action') hostAction(d.id, d.action, d.body, c); });
-    c.on('close', () => { conns.delete(c); broadcast(); });
-    c.on('error', () => { conns.delete(c); broadcast(); });
-    conns.set(c, null);
+}
+
+function hostReady(c, base, meta) {
+  status = '';
+  c.publish(base + '/meta', meta(true), { qos: 1, retain: true });
+  c.subscribe([base + '/in/+', base + '/presence/+'], { qos: 1 });
+  c.removeAllListeners('message');
+  c.on('message', (t, p) => {
+    const s = p.toString();
+    if (t.startsWith(base + '/presence/')) {
+      const pid = t.slice((base + '/presence/').length);
+      const on = s === 'on';
+      if (presence[pid] !== on) { presence[pid] = on; if (S.players[pid]) { delete lastSent[pid]; broadcast(); } }
+    } else if (t.startsWith(base + '/in/') && s) {
+      const pid = t.slice((base + '/in/').length);
+      try { const m = JSON.parse(s); hostAction(pid, m.action, m.body, m.seq); } catch (e) {}
+    }
   });
-  peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
-  peer.on('error', (e) => {
-    if (e.type === 'unavailable-id') {
-      peer.destroy();
-      if (restored) { status = ''; err = 'החדר הקודם כבר לא זמין – נוצר חדר חדש'; createRoom(name, null, true); }
-      else createRoom(name, null, false);
-    } else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') {
-      err = 'בעיה בחיבור לאינטרנט'; render(true);
+  sessionStorage.setItem('imp_session', JSON.stringify({ role: 'host', code: roomCode, name: S.players[me].name }));
+  setUrl(roomCode);
+  Object.keys(lastSent).forEach(k => delete lastSent[k]);
+  broadcast();
+  keepAwake();
+}
+
+// ---------- שחקן ----------
+function joinRoom(name, code) {
+  role = 'guest'; roomCode = code; guestMeta = null;
+  status = 'מתחבר לחדר ' + code + '…'; err = ''; render(true);
+  const base = TOPIC(code);
+  const c = connect({ topic: base + '/presence/' + me, payload: 'off', qos: 1, retain: true });
+  sessionStorage.setItem('imp_session', JSON.stringify({ role: 'guest', code, name }));
+  clearTimeout(notFoundTimer);
+  notFoundTimer = setTimeout(() => {
+    if (role === 'guest' && !guestMeta && client && client.connected) {
+      leaveLocal(); err = 'לא נמצא חדר עם הקוד ' + code + '. בדקו את הקוד.'; render(true);
+    }
+  }, 7000);
+  c.on('connect', () => {
+    c.publish(base + '/presence/' + me, 'on', { qos: 1, retain: true });
+    c.subscribe([base + '/meta', base + '/s/' + me], { qos: 1 });
+    if (guestMeta && st && st.joined) { status = ''; render(true); }
+    if (pending) sendPending();
+  });
+  c.on('message', (t, p) => {
+    const s = p.toString();
+    if (t === base + '/meta') {
+      if (!s) { if (guestMeta) { leaveLocal(); err = 'החדר נסגר'; render(true); } return; }
+      const m = JSON.parse(s);
+      const first = !guestMeta;
+      if (guestMeta && guestMeta.roomId !== m.roomId) { st = null; }
+      guestMeta = m; hostAlive = m.alive;
+      status = (st && st.joined) ? '' : (m.alive ? 'מצטרף למשחק…' : 'המנהל יצא לרגע מהמשחק… ההצטרפות תושלם כשיחזור');
+      if (first) { setUrl(code); send('join', { name }); }
+      render(true);
+    } else if (s) {
+      const v = JSON.parse(s);
+      if (!guestMeta || v.roomId !== guestMeta.roomId) return; // הודעה ישנה מחדר קודם
+      if (v.kicked) { leaveLocal(); err = 'הוצאת מהמשחק'; render(true); return; }
+      if (v.closed) { leaveLocal(); err = 'החדר נסגר'; render(true); return; }
+      st = v; if (v.joined) status = '';
+      if (pending && v.ack >= pending.seq) {
+        if (v.error && v.error.seq === pending.seq) {
+          err = v.error.msg;
+          if (pending.action === 'join') { const e = err; leaveLocal(); err = e; }
+        } else if (err && !err.startsWith('אין')) err = '';
+        pending = null; clearInterval(resendTimer);
+      }
+      render(false);
     }
   });
 }
 
-function joinRoom(name, code) {
-  role = 'guest'; roomCode = code;
-  status = 'מתחבר לחדר ' + code + '…'; err = ''; render(true);
-  if (!peer || peer.destroyed) {
-    peer = makePeer();
-    peer.on('error', (e) => {
-      if (e.type === 'peer-unavailable') { status = ''; err = 'לא נמצא חדר עם הקוד ' + roomCode + '. בדקו את הקוד.'; st = null; role = null; render(true); }
-      else if (e.type === 'network' || e.type === 'server-error') { err = 'בעיה בחיבור לאינטרנט'; render(true); }
-    });
-    peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
-  }
-  const go = () => {
-    hostConn = peer.connect(PREFIX + code, { reliable: true });
-    hostConn.on('open', () => {
-      status = '';
-      sessionStorage.setItem('imp_session', JSON.stringify({ role: 'guest', code, name }));
-      history.replaceState(null, '', location.pathname + '?room=' + code);
-      send('join', { name });
-    });
-    hostConn.on('data', (d) => {
-      if (d.type === 'state') { st = d.st; if (err && !err.startsWith('השם')) err = ''; render(false); }
-      else if (d.type === 'error') {
-        err = d.msg;
-        if (!st || !st.joined) { st = null; role = null; sessionStorage.removeItem('imp_session'); hostConn.close(); }
-        render(true);
-      } else if (d.type === 'kicked') { sessionStorage.removeItem('imp_session'); role = null; st = null; err = 'הוצאת מהמשחק'; render(true); }
-    });
-    hostConn.on('close', () => {
-      if (role !== 'guest') return;
-      status = 'החיבור למנהל נותק… מנסה שוב'; render(true);
-      setTimeout(() => { if (role === 'guest') joinRoom(name, code); }, 2500);
-    });
-  };
-  if (peer.open) go(); else peer.once('open', go);
+function sendPending() {
+  if (client && client.connected && pending)
+    client.publish(TOPIC(roomCode) + '/in/' + me, JSON.stringify(pending), { qos: 1 });
 }
 
 function send(action, body = {}) {
-  if (role === 'host') hostAction(me, action, body, null);
-  else if (hostConn && hostConn.open) hostConn.send({ type: 'action', id: me, action, body });
-  else { err = 'אין חיבור למנהל'; render(true); }
+  if (role === 'host') { hostAction(me, action, body, 0); return; }
+  if (!client) { err = 'אין חיבור'; render(true); return; }
+  pending = { seq: Date.now(), action, body };
+  sendPending();
+  clearInterval(resendTimer);
+  resendTimer = setInterval(sendPending, 3000); // שולחים שוב עד שהמנהל מאשר
 }
+
+function leaveLocal() {
+  clearInterval(resendTimer); clearTimeout(notFoundTimer); pending = null;
+  if (client) {
+    if (role === 'guest') client.publish(TOPIC(roomCode) + '/presence/' + me, '', { qos: 1, retain: true });
+    const c = client; setTimeout(() => { try { c.end(false); } catch (e) {} }, 400);
+  }
+  client = null; role = null; st = null; S = null; guestMeta = null; status = '';
+  sessionStorage.removeItem('imp_session');
+  setUrl(null);
+}
+
+// המסך של המנהל לא נכבה בזמן המשחק (אם הדפדפן תומך)
+let wakeLock = null;
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && role === 'host') keepAwake(); });
 
 // =====================================================================
 //                              תצוגה
@@ -266,7 +355,12 @@ const app = document.getElementById('app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const color = (id) => { const i = st.players.findIndex(p => p.id === id); return COLORS[(i < 0 ? 0 : i) % COLORS.length]; };
 const avatar = (p) => `<span class="av" style="background:${color(p.id)}">${esc(p.name[0] || '?')}</span>`;
-const joinLink = () => location.origin + location.pathname + '?room=' + roomCode;
+function setUrl(code) {
+  const q = new URLSearchParams(location.search);
+  if (code) q.set('room', code); else q.delete('room');
+  const s = q.toString(); history.replaceState(null, '', location.pathname + (s ? '?' + s : ''));
+}
+const joinLink = () => { const q = new URLSearchParams(location.search); q.set('room', roomCode); return location.origin + location.pathname + '?' + q; };
 
 function render(force) {
   const active = document.activeElement;
@@ -279,6 +373,7 @@ function render(force) {
   let h = `<h1>מי <span>המתחזה</span>? 🕵️</h1>`;
   if (err) h += `<div class="err">${esc(err)}</div>`;
   if (status) h += `<div class="panel big">⏳ ${esc(status)}</div>`;
+  if (role === 'guest' && st && st.joined && !hostAlive) h += `<div class="panel big">📴 המנהל יצא לרגע מהמשחק… ממתינים שיחזור</div>`;
 
   if (!st || !st.joined) { if (!status) h += homeView(); }
   else if (st.phase === 'lobby') h += lobbyView();
@@ -307,7 +402,7 @@ function homeView() {
   </div>
   <div class="panel">
     <h2>👑 או – פתיחת חדר חדש</h2>
-    <div class="note" style="margin:0">מי שפותח את החדר הוא המנהל. הטלפון שלו צריך להישאר פתוח על המשחק.</div>
+    <div class="note" style="margin:0">מי שפותח את החדר הוא המנהל. בזמן המשחק כדאי שהדף יישאר פתוח אצלו.</div>
     <button id="createBtn" class="green">✨ פתיחת חדר חדש</button>
   </div>
   ${rulesPanel()}`;
@@ -430,12 +525,11 @@ function rulesPanel() {
 function leaveGame() {
   if (role === 'host') {
     if (!confirmLeave()) return;
-    for (const c of conns.keys()) { try { c.send({ type: 'kicked' }); } catch (e) {} }
+    S.order.forEach(pid => { if (pid !== me) pub('s/' + pid, { roomId: S.roomId, closed: true }); });
+    pub('meta', '');
     localStorage.removeItem('imp_host_state');
   } else send('leave');
-  sessionStorage.removeItem('imp_session');
-  role = null; st = null; S = null;
-  setTimeout(() => { if (peer) peer.destroy(); peer = null; hostConn = null; history.replaceState(null, '', location.pathname); render(true); }, 300);
+  setTimeout(() => { leaveLocal(); render(true); }, 300);
 }
 let leaveArmed = 0;
 function confirmLeave() { // אישור בלחיצה כפולה במקום חלון קופץ
@@ -482,7 +576,7 @@ function bind() {
 
 // ---------- התחלה: חזרה אוטומטית אחרי רענון הדף ----------
 (function boot() {
-  if (typeof Peer === 'undefined') { err = 'לא הצלחתי לטעון את רכיב החיבור – בדקו חיבור לאינטרנט ורעננו'; render(true); return; }
+  if (typeof mqtt === 'undefined') { err = 'לא הצלחתי לטעון את רכיב החיבור – בדקו חיבור לאינטרנט ורעננו'; render(true); return; }
   let sess = null;
   try { sess = JSON.parse(sessionStorage.getItem('imp_session')); } catch (e) {}
   if (sess && sess.role === 'host') {
