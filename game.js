@@ -3,7 +3,7 @@
 // כך שהחדר לא נעלם גם כשהמנהל יוצא לרגע מהאפליקציה (למשל כדי לשלוח קישור בוואטסאפ).
 
 const MIN_PLAYERS = 3;
-const VERSION = 4;
+const VERSION = 5;
 // כמה שרתי הודעות ציבוריים – אם אחד חסום או לא עובד, עוברים לבא בתור
 const BROKERS = new URLSearchParams(location.search).get('broker')
   ? new URLSearchParams(location.search).get('broker').split(',')
@@ -67,6 +67,27 @@ function startRound() {
   S.phase = 'reveal';
 }
 
+// השוואת ניחוש למילה – סלחנית לאיות (כתיב מלא/חסר, אותיות סופיות, ה׳ הידיעה, ניקוד, רווחים)
+function normWord(s) {
+  return String(s || '').normalize('NFC').replace(/[\u0591-\u05C7]/g, '')
+    .replace(/[םןץףך]/g, c => ({ 'ם': 'מ', 'ן': 'נ', 'ץ': 'צ', 'ף': 'פ', 'ך': 'כ' })[c])
+    .replace(/[^\u05D0-\u05EAa-zA-Z0-9]/g, '').toLowerCase();
+}
+function guessMatches(guess, word) {
+  const g = normWord(guess), w = normWord(word);
+  if (!g) return false;
+  const loose = (x) => x.replace(/[וי]/g, '');
+  const forms = (x) => [x, x.startsWith('ה') ? x.slice(1) : x];
+  return forms(g).some(a => forms(w).some(b => a === b || loose(a) === loose(b)));
+}
+
+function scoreRound(imposterWins) {
+  const r = S.round;
+  r.playerIds.forEach(id => { S.scores[id] = S.scores[id] || 0; });
+  if (imposterWins) r.imposters.forEach(id => S.scores[id] += 2);
+  else r.playerIds.filter(id => !r.imposters.includes(id)).forEach(id => S.scores[id]++);
+}
+
 function finishVote() {
   const r = S.round, tally = {};
   Object.values(r.votes).forEach(t => { tally[t] = (tally[t] || 0) + 1; });
@@ -74,9 +95,7 @@ function finishVote() {
   const top = Object.keys(tally).filter(k => tally[k] === max);
   const caught = max > 0 && top.length === 1 && r.imposters.includes(top[0]);
   r.result = { tally, top: max > 0 ? top : [], caught };
-  r.playerIds.forEach(id => { S.scores[id] = S.scores[id] || 0; });
-  if (caught) r.playerIds.filter(id => !r.imposters.includes(id)).forEach(id => S.scores[id]++);
-  else r.imposters.forEach(id => S.scores[id] += 2);
+  scoreRound(!caught);
   S.phase = 'results';
 }
 
@@ -128,6 +147,26 @@ const actions = {
   again(id) { hostOnly(id); startRound(); },
   lobby(id) { hostOnly(id); S.phase = 'lobby'; S.round = null; },
   resetScores(id) { hostOnly(id); S.scores = {}; },
+  guess(id, b) {
+    const r = S.round;
+    if (!r || !['discuss', 'vote'].includes(S.phase) || !r.imposters.includes(id)) throw 'אי אפשר לנחש עכשיו';
+    const text = String(b.text || '').trim().slice(0, 30);
+    if (!text) throw 'צריך לכתוב ניחוש';
+    const correct = guessMatches(text, r.word);
+    r.guess = { by: id, text, correct };
+    r.result = { tally: {}, top: [], caught: !correct, mode: 'guess' };
+    Object.values(r.votes).forEach(t => { r.result.tally[t] = (r.result.tally[t] || 0) + 1; });
+    scoreRound(correct);
+    S.phase = 'results';
+  },
+  approveGuess(id) { // המנהל מאשר ניחוש שנפסל בגלל שגיאת כתיב
+    hostOnly(id);
+    const r = S.round;
+    if (S.phase !== 'results' || !r.guess || r.guess.correct) return;
+    r.playerIds.filter(x => !r.imposters.includes(x)).forEach(x => S.scores[x] = Math.max(0, (S.scores[x] || 0) - 1));
+    r.imposters.forEach(x => S.scores[x] = (S.scores[x] || 0) + 2);
+    r.guess.correct = true; r.guess.approved = true; r.result.caught = false;
+  },
 };
 
 function view(pid) {
@@ -145,6 +184,7 @@ function view(pid) {
       inRound, starter: name(r.starter), seenCount: r.seen.length, total: r.playerIds.length,
       iSeen: r.seen.includes(pid), votedCount: Object.keys(r.votes).length, myVote: r.votes[pid] || null,
       candidates: r.playerIds.map(id => ({ id, name: name(id) })), impCount: r.imposters.length,
+      canGuess: ['discuss', 'vote'].includes(S.phase) && r.imposters.includes(pid),
     };
     if (inRound) {
       out.round.card = r.imposters.includes(pid)
@@ -155,7 +195,8 @@ function view(pid) {
       Object.assign(out.round, {
         word: r.word, category: r.category, imposterNames: r.imposters.map(name),
         result: {
-          caught: r.result.caught, top: r.result.top.map(name),
+          caught: r.result.caught, top: r.result.top.map(name), mode: r.result.mode || 'vote',
+          guess: r.guess ? { name: name(r.guess.by), text: r.guess.text, correct: r.guess.correct, approved: !!r.guess.approved } : null,
           tally: r.playerIds.map(id => ({ name: name(id), votes: r.result.tally[id] || 0, imposter: r.imposters.includes(id) })).sort((a, b) => b.votes - a.votes),
         },
       });
@@ -512,7 +553,20 @@ function discussView() {
       <li>אפשר לעשות 2–3 סיבובים של רמזים.</li>
     </ol></div>
   <details class="panel"><summary>להציץ שוב בקלף שלי</summary>${cardHtml()}</details>
+  ${guessPanel()}
   ${st.isHost ? '<button id="voteBtn" class="pink">🗳️ עוברים להצבעה</button>' : '<div class="note">המנהל יעביר להצבעה כשתהיו מוכנים</div>'}`;
+}
+
+let guessDraft = '', guessConfirm = false;
+function guessPanel() {
+  if (!st.round.canGuess) return '';
+  return `<div class="panel guess"><h2>🤔 גילית את המילה?</h2>
+    <div class="note" style="margin:0 0 10px">אפשר לנחש <b>פעם אחת</b>: ניחוש נכון – ניצחת! ניחוש לא נכון – השחקנים מנצחים.</div>
+    <input id="guessInput" type="text" maxlength="30" placeholder="המילה היא…" value="${esc(guessDraft)}" autocomplete="off">
+    ${guessConfirm
+      ? `<button id="guessGo" class="pink">✅ בטוח/ה! לשלוח את "${esc(guessDraft)}"</button><button class="ghost" id="guessCancel">רגע, לא בטוח/ה</button>`
+      : `<button id="guessBtn">🎯 אני יודע/ת את המילה!</button>`}
+  </div>`;
 }
 
 function voteView() {
@@ -522,6 +576,7 @@ function voteView() {
       `<button data-vote="${c.id}" class="${r.myVote === c.id ? 'sel' : ''}">${avatar(c)} ${esc(c.name)} ${r.myVote === c.id ? ' ✔' : ''}</button>`).join('')}</div>
     <div class="progress"><div style="width:${100 * r.votedCount / r.total}%"></div></div>
     <div class="note">${r.votedCount} מתוך ${r.total} הצביעו${r.myVote ? ' · אפשר לשנות עד שכולם מצביעים' : ''}</div></div>`;
+  h += guessPanel();
   if (st.isHost) h += `<button class="ghost" id="endVoteBtn">לסיים הצבעה עכשיו</button>`;
   return h;
 }
@@ -529,14 +584,20 @@ function voteView() {
 function resultsView() {
   const r = st.round, res = r.result;
   const win = (r.card && r.card.imposter) ? !res.caught : res.caught;
-  let h = `<div class="banner ${res.caught ? 'win' : 'lose'}">${res.caught ? '🎉 תפסתם את המתחזה!' : '😈 המתחזה ניצח!'}</div>
+  const g = res.guess;
+  const title = g ? (g.correct ? '😈 המתחזה ניחש את המילה!' : '🎉 המתחזה טעה בניחוש – השחקנים ניצחו!')
+                  : (res.caught ? '🎉 תפסתם את המתחזה!' : '😈 המתחזה ניצח!');
+  let h = `<div class="banner ${res.caught ? 'win' : 'lose'}">${title}</div>
     <div class="panel big">${win ? '🏆 ניצחת בסיבוב הזה!' : '💪 בפעם הבאה!'}</div>
     <div class="panel reveal-word">המילה הייתה <b>${esc(r.word)}</b>(${esc(r.category)})
       <p>🕵️ ${r.imposterNames.length > 1 ? 'המתחזים היו' : 'המתחזה היה/תה'}: <b style="font-size:1.5rem;display:inline;color:var(--pink)">${r.imposterNames.map(esc).join(' ו')}</b></p></div>
-    <div class="panel"><h2>תוצאות ההצבעה</h2><ul class="players tally">${res.tally.map(t =>
+    ${g ? `<div class="panel big">🎯 ${esc(g.name)} ניחש/ה: <b>"${esc(g.text)}"</b> ${g.correct ? '✔' : '✘'}
+        ${g.approved ? '<div class="note">המנהל אישר את הניחוש</div>' : ''}
+        ${st.isHost && !g.correct ? '<button class="ghost" id="approveBtn">זה בעצם נכון (רק שגיאת כתיב) – לאשר</button>' : ''}</div>` : ''}
+    ${g ? '' : `<div class="panel"><h2>תוצאות ההצבעה</h2><ul class="players tally">${res.tally.map(t =>
       `<li><span class="nm">${t.imposter ? '🕵️ ' : ''}${esc(t.name)}</span><span class="v">${t.votes} קולות</span></li>`).join('')}</ul>
-      ${!res.caught && res.top.length > 1 ? '<div class="note">היה תיקו – אז המתחזה חמק!</div>' : ''}</div>
-    <div class="panel"><h2>⭐ ניקוד</h2>${playersList(false)}<div class="note">תפסתם את המתחזה = נקודה לכל השאר · המתחזה חמק = 2 נקודות למתחזה</div></div>`;
+      ${!res.caught && res.top.length > 1 ? '<div class="note">היה תיקו – אז המתחזה חמק!</div>' : ''}</div>`}
+    <div class="panel"><h2>⭐ ניקוד</h2>${playersList(false)}<div class="note">השחקנים ניצחו = נקודה לכל אחד · המתחזה ניצח = 2 נקודות למתחזה</div></div>`;
   h += st.isHost ? `<button id="againBtn" class="green">🔄 סיבוב חדש</button><button class="ghost" id="lobbyBtn">חזרה לחדר ההמתנה</button>`
                  : `<div class="note">מחכים שהמנהל יתחיל סיבוב חדש…</div>`;
   return h;
@@ -550,6 +611,7 @@ function rulesPanel() {
     <li>כל אחד בתורו אומר מילה אחת שקשורה למילה הסודית.</li>
     <li>בסוף כולם מצביעים: מי המתחזה?</li>
     <li>תפסתם אותו? ניצחתם! הוא חמק? המתחזה ניצח!</li>
+    <li>🎯 המתחזה יכול בכל רגע לנחש את המילה (פעם אחת): ניחש נכון – הוא מנצח, טעה – השחקנים מנצחים.</li>
   </ol></details>`;
 }
 
@@ -592,6 +654,12 @@ function bind() {
   on('skipBtn', () => send('discuss'));
   on('voteBtn', () => send('toVote'));
   on('endVoteBtn', () => send('endVote'));
+  const gi = $('guessInput');
+  if (gi) gi.oninput = () => { guessDraft = gi.value; if (guessConfirm) { guessConfirm = false; render(true); $('guessInput').focus(); } };
+  on('guessBtn', () => { guessDraft = ($('guessInput').value || '').trim(); if (!guessDraft) { err = 'צריך לכתוב ניחוש'; render(true); return; } err = ''; guessConfirm = true; render(true); });
+  on('guessCancel', () => { guessConfirm = false; render(true); });
+  on('guessGo', () => { guessConfirm = false; send('guess', { text: guessDraft }); guessDraft = ''; });
+  on('approveBtn', () => send('approveGuess'));
   document.querySelectorAll('[data-card]').forEach(c => c.onclick = () => { cardOpen = !cardOpen; render(true); });
   document.querySelectorAll('[data-kick]').forEach(b => b.onclick = () => send('kick', { id: b.dataset.kick }));
   document.querySelectorAll('[data-vote]').forEach(b => b.onclick = () => send('vote', { target: b.dataset.vote }));
