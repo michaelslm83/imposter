@@ -3,7 +3,7 @@
 // כך שהחדר לא נעלם גם כשהמנהל יוצא לרגע מהאפליקציה (למשל כדי לשלוח קישור בוואטסאפ).
 
 const MIN_PLAYERS = 3;
-const VERSION = 5;
+const VERSION = 6;
 // כמה שרתי הודעות ציבוריים – אם אחד חסום או לא עובד, עוברים לבא בתור
 const BROKERS = new URLSearchParams(location.search).get('broker')
   ? new URLSearchParams(location.search).get('broker').split(',')
@@ -11,17 +11,7 @@ const BROKERS = new URLSearchParams(location.search).get('broker')
 let brokerUrl = BROKERS[0];
 const TOPIC = (code) => 'mi-hamitchaze-il/v2/' + code;
 
-// ---------- מאגר מילים לגילאי 5–12 ----------
-const WORDS = {
-  'חיות': ['כלב', 'חתול', 'פיל', 'ג׳ירפה', 'אריה', 'קוף', 'דולפין', 'פינגווין', 'ארנב', 'צב', 'פרפר', 'תנין', 'זברה', 'ינשוף', 'דבורה', 'סוס', 'פרה', 'נחש', 'קנגורו', 'תרנגולת'],
-  'אוכל': ['פיצה', 'גלידה', 'בננה', 'תפוח', 'פלאפל', 'שוקולד', 'עוגה', 'פופקורן', 'ספגטי', 'חביתה', 'אבטיח', 'במבה', 'שניצל', 'תות', 'לחמנייה', 'ענבים', 'מרק', 'סלט', 'פנקייק', 'גזר'],
-  'מקומות': ['בית ספר', 'ים', 'גן חיות', 'בית חולים', 'סופרמרקט', 'פארק', 'קולנוע', 'בריכה', 'ספרייה', 'מטוס', 'גן שעשועים', 'מדבר', 'יער', 'מסעדה', 'תחנת דלק', 'קרקס', 'חלל', 'מספרה', 'אוטובוס', 'חוף'],
-  'חפצים בבית': ['מיטה', 'מקרר', 'טלוויזיה', 'כרית', 'מטרייה', 'מברשת שיניים', 'מספריים', 'שעון', 'מנורה', 'מראה', 'כיסא', 'מחשב', 'כוס', 'מפתח', 'כדור', 'עיפרון', 'ספר', 'שמיכה', 'כפית', 'תיק'],
-  'מקצועות': ['רופא', 'מורה', 'שוטר', 'כבאי', 'טבח', 'טייס', 'וטרינר', 'צייר', 'זמר', 'נהג', 'אסטרונאוט', 'רופא שיניים', 'חקלאי', 'ספר', 'מלצר', 'קוסם', 'דייג', 'גנן', 'שחקן כדורגל', 'אופה'],
-  'ספורט ומשחקים': ['כדורגל', 'כדורסל', 'שחייה', 'טניס', 'אופניים', 'מחבואים', 'קפיצה בחבל', 'קלפים', 'שחמט', 'כדורעף', 'ריצה', 'גלישה', 'החלקה על הקרח', 'ג׳ודו', 'באולינג', 'פאזל', 'קלאס', 'סקייטבורד', 'תופסת', 'לגו'],
-  'כלי תחבורה': ['מכונית', 'רכבת', 'אונייה', 'מסוק', 'אופנוע', 'טרקטור', 'צוללת', 'רקטה', 'אמבולנס', 'כבאית', 'קורקינט', 'סירה', 'כדור פורח', 'משאית', 'מונית'],
-  'טבע': ['שמש', 'ירח', 'קשת בענן', 'הר', 'נהר', 'עץ', 'פרח', 'שלג', 'גשם', 'כוכב', 'ענן', 'הר געש', 'מפל', 'אבן', 'עלה', 'ברק', 'מערה', 'אי', 'חול', 'רוח'],
-};
+// מאגר המילים נמצא בקובץ words.js
 
 // ---------- זהות השחקן ----------
 let me = localStorage.getItem('imp_id');
@@ -36,7 +26,7 @@ const presence = {};     // playerId -> true/false
 function newState() {
   return {
     players: {}, order: [], hostId: me, phase: 'lobby',
-    settings: { hint: true, imposters: 1, category: 'הכול' },
+    settings: { hint: true, imposters: 1, category: 'הכול', pictures: true },
     round: null, used: [], scores: {}, roundNo: 0,
     roomId: Math.random().toString(36).slice(2, 10), seq: {}, errs: {},
   };
@@ -49,7 +39,7 @@ const activeIds = () => S.order.filter(id => S.players[id]);
 function pickWord() {
   const cats = S.settings.category === 'הכול' ? Object.keys(WORDS) : [S.settings.category];
   const pool = [];
-  cats.forEach(c => WORDS[c].forEach(w => pool.push({ c, w })));
+  cats.forEach(c => WORDS[c].words.forEach(([w, e]) => pool.push({ c, w, e })));
   let fresh = pool.filter(x => !S.used.includes(x.c + '|' + x.w));
   if (!fresh.length) { S.used = S.used.filter(k => !pool.some(x => x.c + '|' + x.w === k)); fresh = pool; }
   const p = fresh[rint(fresh.length)];
@@ -60,9 +50,9 @@ function pickWord() {
 function startRound() {
   const ids = activeIds();
   const nImp = Math.min(S.settings.imposters, ids.length >= 6 ? 2 : 1);
-  const { c, w } = pickWord();
+  const { c, w, e } = pickWord();
   S.roundNo++;
-  S.round = { word: w, category: c, playerIds: ids, imposters: shuffle(ids).slice(0, nImp),
+  S.round = { word: w, emoji: e, category: c, playerIds: ids, imposters: shuffle(ids).slice(0, nImp),
     starter: ids[rint(ids.length)], seen: [], votes: {}, result: null };
   S.phase = 'reveal';
 }
@@ -133,6 +123,7 @@ const actions = {
     if (typeof b.hint === 'boolean') S.settings.hint = b.hint;
     if ([1, 2].includes(b.imposters)) S.settings.imposters = b.imposters;
     if (b.category && (b.category === 'הכול' || WORDS[b.category])) S.settings.category = b.category;
+    if (typeof b.pictures === 'boolean') S.settings.pictures = b.pictures;
   },
   start(id) { hostOnly(id); if (activeIds().length < MIN_PLAYERS) throw `צריך לפחות ${MIN_PLAYERS} שחקנים`; startRound(); },
   seen(id) { const r = S.round; if (S.phase !== 'reveal' || !r.playerIds.includes(id)) return; if (!r.seen.includes(id)) r.seen.push(id); checkProgress(); },
@@ -175,7 +166,7 @@ function view(pid) {
     roomId: S.roomId, ack: S.seq[pid] || 0, error: S.errs[pid] || null,
     me: pid, isHost: pid === S.hostId, joined: !!S.players[pid], phase: S.phase,
     players: activeIds().map(id => ({ id, name: name(id), online: isOnline(id), host: id === S.hostId, score: S.scores[id] || 0 })),
-    settings: S.settings, categories: ['הכול', ...Object.keys(WORDS)], minPlayers: MIN_PLAYERS, roundNo: S.roundNo,
+    settings: S.settings, categories: ['הכול', ...Object.keys(WORDS)], catIcons: Object.fromEntries(Object.entries(WORDS).map(([k, v]) => [k, v.icon])), minPlayers: MIN_PLAYERS, roundNo: S.roundNo,
   };
   const r = S.round;
   if (r && S.phase !== 'lobby') {
@@ -187,13 +178,15 @@ function view(pid) {
       canGuess: ['discuss', 'vote'].includes(S.phase) && r.imposters.includes(pid),
     };
     if (inRound) {
+      const pics = S.settings.pictures !== false;
+      const catIcon = WORDS[r.category] ? WORDS[r.category].icon : '';
       out.round.card = r.imposters.includes(pid)
-        ? { imposter: true, hint: S.settings.hint ? r.category : null }
-        : { imposter: false, word: r.word, category: r.category };
+        ? { imposter: true, hint: S.settings.hint ? r.category : null, catIcon: S.settings.hint && pics ? catIcon : null }
+        : { imposter: false, word: r.word, category: r.category, emoji: pics ? r.emoji : null, catIcon: pics ? catIcon : null };
     }
     if (S.phase === 'results') {
       Object.assign(out.round, {
-        word: r.word, category: r.category, imposterNames: r.imposters.map(name),
+        word: r.word, emoji: r.emoji, category: r.category, imposterNames: r.imposters.map(name),
         result: {
           caught: r.result.caught, top: r.result.top.map(name), mode: r.result.mode || 'vote',
           guess: r.guess ? { name: name(r.guess.by), text: r.guess.text, correct: r.guess.correct, approved: !!r.guess.approved } : null,
@@ -420,12 +413,17 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
 // =====================================================================
 //                              תצוגה
+//  נבנתה לפי WCAG 2.2 רמה AA / ת״י 5568, ISO 9241-110 ועקרונות שימושיות
 // =====================================================================
-const COLORS = ['#ffd23f','#3ddc97','#4cc9f0','#ff9f1c','#c77dff','#ff5d8f','#90e0ef','#b5e48c','#f4a261','#e9c46a','#a0c4ff','#ffadad'];
+const COLORS = ['#ffd23f','#3ddc97','#4cc9f0','#ff9f1c','#c77dff','#ff8fb1','#90e0ef','#b5e48c','#f4a261','#e9c46a','#a0c4ff','#ffadad'];
 const app = document.getElementById('app');
+const live = document.getElementById('live');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const color = (id) => { const i = st.players.findIndex(p => p.id === id); return COLORS[(i < 0 ? 0 : i) % COLORS.length]; };
-const avatar = (p) => `<span class="av" style="background:${color(p.id)}">${esc(p.name[0] || '?')}</span>`;
+const avatar = (p) => `<span class="av" aria-hidden="true" style="background:${color(p.id)}">${esc(p.name[0] || '?')}</span>`;
+const pic = (emoji, label, cls = 'pic') => !emoji ? '' : label
+  ? `<span class="${cls}" role="img" aria-label="${esc(label)}">${emoji}</span>`
+  : `<span class="${cls}" aria-hidden="true">${emoji}</span>`;
 function setUrl(code) {
   const q = new URLSearchParams(location.search);
   if (code) q.set('room', code); else q.delete('room');
@@ -433,59 +431,155 @@ function setUrl(code) {
 }
 const joinLink = () => { const q = new URLSearchParams(location.search); q.set('room', roomCode); return location.origin + location.pathname + '?' + q; };
 
+// ---------- הכרזות לקורא מסך (aria-live) ----------
+let lastAnnounced = '';
+function announce(msg) {
+  if (!msg || msg === lastAnnounced) return;
+  lastAnnounced = msg;
+  live.textContent = '';
+  setTimeout(() => { live.textContent = msg; }, 60);
+}
+const PHASE_NAMES = { lobby: 'חדר ההמתנה', reveal: 'שלב 1: הסתכלו על הקלף', discuss: 'שלב 2: זמן לרמזים', vote: 'שלב 3: הצבעה', results: 'שלב 4: תוצאות' };
+
+// ---------- גודל טקסט (WCAG 1.4.4) ----------
+const SIZES = [{ v: 100, n: 'רגיל' }, { v: 120, n: 'גדול' }, { v: 140, n: 'גדול מאוד' }];
+let sizeIdx = Math.min(2, Math.max(0, +(localStorage.getItem('imp_size') || 0)));
+const applySize = () => { document.documentElement.style.fontSize = SIZES[sizeIdx].v + '%'; };
+applySize();
+
+// ---------- השמעת מילה (Web Speech API) ----------
+let heVoice = null;
+function pickVoice() {
+  if (!('speechSynthesis' in window)) return;
+  const v = speechSynthesis.getVoices();
+  heVoice = v.find(x => /^(he|iw)/i.test(x.lang)) || null;
+}
+if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function speak(text) {
+  if (!('speechSynthesis' in window)) { err = 'הדפדפן הזה לא יכול להשמיע מילים. אפשר לבקש ממבוגר להקריא בשקט.'; render(true); return; }
+  pickVoice();
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = heVoice ? heVoice.lang : 'he-IL';
+  if (heVoice) u.voice = heVoice;
+  u.rate = 0.8; u.volume = 0.7;
+  u.onerror = () => { err = 'לא הצלחתי להשמיע. ייתכן שאין קול בעברית במכשיר – אפשר להוסיף אותו בהגדרות הטלפון (נגישות ← הקראה).'; render(true); };
+  speechSynthesis.speak(u);
+}
+
+// ---------- ציור הדף ----------
+let lastPhaseKey = '', errField = null, leaveConfirm = false;
 function render(force) {
   const active = document.activeElement;
-  if (!force && active && active.tagName === 'INPUT') return;
+  const typing = active && ((active.tagName === 'INPUT' && active.type === 'text') || active.tagName === 'SELECT');
+  if (!force && typing && (st && st.joined ? st.phase + st.roundNo : 'home') === lastPhaseKey) return;
   if (st && st.roundNo !== lastRound) { lastRound = st.roundNo; cardOpen = false; }
-  const key = JSON.stringify(st) + err + status + cardOpen + role;
+  const key = JSON.stringify(st) + err + status + cardOpen + role + leaveConfirm + sizeIdx;
   if (!force && key === lastKey) return;
   lastKey = key;
 
-  let h = `<h1>מי <span>המתחזה</span>? 🕵️</h1>`;
-  if (err) h += `<div class="err">${esc(err)}</div>`;
-  if (status) h += `<div class="panel big">⏳ ${esc(status)}</div>`;
+  // שמירת המיקוד כדי שמשתמשי מקלדת/קורא מסך לא יאבדו את מקומם (WCAG 2.4.3)
+  const focusId = active && active.id && app.contains(active) ? active.id : null;
+  const phaseKey = (st && st.joined ? st.phase + st.roundNo : 'home');
+  const phaseChanged = phaseKey !== lastPhaseKey;
+
+  let h = `<header class="top">
+      <h1 tabindex="-1" id="mainTitle"><span aria-hidden="true">🕵️</span> מי <span class="hl">המתחזה</span>?</h1>
+      <button class="tool" id="sizeBtn">גודל טקסט<span class="sr-only">: ${SIZES[sizeIdx].n}</span></button>
+    </header>`;
+  if (st && st.joined && st.round && st.round.inRound && st.phase !== 'lobby') h += stepper();
+  if (err) h += `<div class="err" id="errBox"><span aria-hidden="true">⚠️</span> ${esc(err)}</div>`;
+  if (status) h += `<div class="panel big status"><span class="spinner" aria-hidden="true"></span> ${esc(status)}</div>`;
   if (role === 'guest' && st && st.joined && !hostAlive) h += `<div class="panel big">📴 המנהל יצא לרגע מהמשחק… ממתינים שיחזור</div>`;
 
   if (!st || !st.joined) { if (!status) h += homeView(); }
   else if (st.phase === 'lobby') h += lobbyView();
-  else if (st.round && !st.round.inRound) h += `<div class="panel big">🎬 סיבוב כבר התחיל!<div class="note">תיכנס/י לסיבוב הבא</div></div>`;
+  else if (st.round && !st.round.inRound) h += `<div class="panel big">🎬 סיבוב כבר התחיל!<p class="note">תצטרפו בסיבוב הבא</p></div>`;
   else if (st.phase === 'reveal') h += revealView();
   else if (st.phase === 'discuss') h += discussView();
   else if (st.phase === 'vote') h += voteView();
   else if (st.phase === 'results') h += resultsView();
+  h += footer();
 
   app.innerHTML = h;
+  hideEmojiFromScreenReaders(app);
   bind();
+
+  if (focusId && document.getElementById(focusId)) document.getElementById(focusId).focus({ preventScroll: true });
+  else if (phaseChanged && lastPhaseKey) { const t = document.getElementById('mainTitle'); if (t) t.focus({ preventScroll: true }); window.scrollTo(0, 0); }
+  lastPhaseKey = phaseKey;
+
+  if (err) announce(err);
+  else if (status) announce(status);
+  else if (st && st.joined && phaseChanged) announce(PHASE_NAMES[st.phase] || '');
+}
+
+// אימוג׳י דקורטיבי בתוך טקסט מוסתר מקורא המסך, כדי שלא יקריא "פרצוף מחייך" וכו׳
+const EMOJI_RE = /(?:\p{Extended_Pictographic}(?:️|\p{Emoji_Modifier})?(?:‍\p{Extended_Pictographic}(?:️)?)*)+/gu;
+function hideEmojiFromScreenReaders(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode;
+    if (n.parentElement.closest('[role="img"],[aria-hidden="true"],option,title')) continue;
+    EMOJI_RE.lastIndex = 0;
+    if (EMOJI_RE.test(n.nodeValue)) nodes.push(n);
+  }
+  nodes.forEach(n => {
+    const frag = document.createDocumentFragment();
+    let last = 0; const s = n.nodeValue; EMOJI_RE.lastIndex = 0; let m;
+    while ((m = EMOJI_RE.exec(s))) {
+      if (m.index > last) frag.appendChild(document.createTextNode(s.slice(last, m.index)));
+      const sp = document.createElement('span'); sp.setAttribute('aria-hidden', 'true'); sp.textContent = m[0]; frag.appendChild(sp);
+      last = m.index + m[0].length;
+    }
+    if (last < s.length) frag.appendChild(document.createTextNode(s.slice(last)));
+    n.parentNode.replaceChild(frag, n);
+  });
+}
+
+// מחוון שלבים – המשתמש תמיד יודע איפה הוא נמצא (ISO 9241-110: שקיפות)
+function stepper() {
+  const steps = [['reveal', 'קלף', '🃏'], ['discuss', 'רמזים', '🗣️'], ['vote', 'הצבעה', '🗳️'], ['results', 'תוצאות', '🏆']];
+  const cur = steps.findIndex(s => s[0] === st.phase);
+  return `<nav aria-label="שלבי הסיבוב"><ol class="stepper">${steps.map(([k, n, e], i) =>
+    `<li class="${i < cur ? 'done' : i === cur ? 'cur' : ''}" ${i === cur ? 'aria-current="step"' : ''}>
+       <span class="dot" aria-hidden="true">${i < cur ? '✓' : e}</span><span>${n}</span></li>`).join('')}</ol></nav>`;
+}
+
+function field(id, label, opts) {
+  const invalid = errField === id;
+  return `<label for="${id}" class="lbl">${label}</label>
+    <input id="${id}" type="text" ${opts} ${invalid ? 'aria-invalid="true" aria-describedby="errBox"' : ''}>`;
 }
 
 function homeView() {
   const saved = localStorage.getItem('imp_name') || '';
   const urlRoom = new URLSearchParams(location.search).get('room') || '';
-  return `<p class="sub">משחק מסיבה לכל המשפחה – כל אחד בטלפון שלו</p>
-  <div class="panel">
-    <h2>איך קוראים לך?</h2>
-    <input id="nameInput" type="text" maxlength="16" placeholder="השם שלי" value="${esc(saved)}" autocomplete="off">
-  </div>
-  <div class="panel">
-    <h2>🔑 הצטרפות לחדר</h2>
-    <input id="codeInput" type="text" inputmode="numeric" maxlength="4" placeholder="קוד חדר (4 ספרות)" value="${esc(urlRoom)}" autocomplete="off">
-    <button id="joinBtn">🚀 הצטרפות</button>
-  </div>
-  <div class="panel">
-    <h2>👑 או – פתיחת חדר חדש</h2>
-    <div class="note" style="margin:0">מי שפותח את החדר הוא המנהל. בזמן המשחק כדאי שהדף יישאר פתוח אצלו.</div>
-    <button id="createBtn" class="green">✨ פתיחת חדר חדש</button>
-  </div>
-  ${rulesPanel()}
-  <div class="note">גרסה ${VERSION}</div>`;
+  return `<p class="sub">משחק מסיבה לכל המשפחה – כל אחד בטלפון שלו · גילאי 5–12 · לפחות 3 שחקנים</p>
+  <section class="panel" aria-labelledby="hName">
+    <h2 id="hName"><span aria-hidden="true">1.</span> מה השם שלך?</h2>
+    ${field('nameInput', 'השם שיופיע במשחק', `maxlength="16" autocomplete="nickname" value="${esc(saved)}"`)}
+  </section>
+  <section class="panel" aria-labelledby="hJoin">
+    <h2 id="hJoin"><span aria-hidden="true">2.</span> 🔑 הצטרפות לחדר קיים</h2>
+    ${field('codeInput', 'קוד החדר (4 ספרות)', `inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" value="${esc(urlRoom)}"`)}
+    <button id="joinBtn" class="btn">🚀 הצטרפות</button>
+  </section>
+  <section class="panel" aria-labelledby="hNew">
+    <h2 id="hNew">👑 או: פתיחת חדר חדש</h2>
+    <p class="note">מי שפותח את החדר הוא המנהל ומקבל קוד לשתף.</p>
+    <button id="createBtn" class="btn green">✨ פתיחת חדר חדש</button>
+  </section>
+  ${rulesPanel()}`;
 }
 
 function playersList(canKick) {
   return `<ul class="players">${st.players.map(p => `
-    <li>${avatar(p)}<span class="nm ${p.online ? '' : 'off'}">${esc(p.name)}${p.id === me ? ' (אני)' : ''}${p.online ? '' : ' 💤'}</span>
-    ${p.score ? `<span>⭐ ${p.score}</span>` : ''}
+    <li>${avatar(p)}<span class="nm ${p.online ? '' : 'off'}">${esc(p.name)}${p.id === me ? ' (אני)' : ''}${p.online ? '' : ' <span class="tagoff">לא מחובר/ת</span>'}</span>
+    ${p.score ? `<span class="score">⭐ ${p.score}<span class="sr-only"> נקודות</span></span>` : ''}
     ${p.host ? '<span class="tag">מנהל</span>' : ''}
-    ${canKick && p.id !== me ? `<button class="x" data-kick="${p.id}" title="הוצאה">✕</button>` : ''}</li>`).join('')}</ul>`;
+    ${canKick && p.id !== me ? `<button class="x" id="kick-${p.id}" data-kick="${p.id}" aria-label="הוצאת ${esc(p.name)} מהמשחק">✕</button>` : ''}</li>`).join('')}</ul>`;
 }
 
 function qrSvg(text) {
@@ -493,91 +587,130 @@ function qrSvg(text) {
   catch (e) { return ''; }
 }
 
+function radios(name, legend, opts, val) {
+  return `<fieldset class="seg-field"><legend>${legend}</legend><div class="seg">${opts.map(([v, t]) =>
+    `<label class="seg-opt"><input type="radio" name="${name}" id="${name}-${v}" value="${v}" ${String(val) === String(v) ? 'checked' : ''}><span>${t}</span></label>`).join('')}</div></fieldset>`;
+}
+
 function lobbyView() {
   const n = st.players.length, need = st.minPlayers - n;
-  let h = `<p class="sub">חדר ההמתנה</p>`;
-  h += `<div class="panel" style="text-align:center"><div class="big">קוד החדר</div>
-    <div class="code">${esc(roomCode)}</div>
-    ${st.isHost ? `<div class="qr">${qrSvg(joinLink())}</div><div class="note">סרקו כדי להצטרף, או הכניסו את הקוד באתר</div>
-      <button class="ghost" id="shareBtn">📤 שיתוף קישור</button>` : ''}</div>`;
-  h += `<div class="panel"><h2>שחקנים (${n})</h2>${playersList(st.isHost)}</div>`;
+  let h = `<p class="sub">חדר ההמתנה</p>
+  <section class="panel center" aria-labelledby="hCode">
+    <h2 id="hCode">קוד החדר</h2>
+    <p class="code" aria-label="קוד החדר: ${esc(roomCode.split('').join(' '))}">${esc(roomCode)}</p>
+    ${st.isHost ? `<div class="qr" role="img" aria-label="קוד QR להצטרפות לחדר">${qrSvg(joinLink())}</div>
+      <p class="note">החברים סורקים את הקוד, או מקלידים את 4 הספרות באתר</p>
+      <button class="btn ghost" id="shareBtn">📤 שיתוף קישור</button>` : ''}
+  </section>
+  <section class="panel" aria-labelledby="hPlayers"><h2 id="hPlayers">שחקנים (${n})</h2>${playersList(st.isHost)}</section>`;
   if (st.isHost) {
     const s = st.settings;
-    h += `<div class="panel"><h2>⚙️ הגדרות</h2>
-      <div class="row"><span>נושא המילים</span><select id="catSel">${st.categories.map(c => `<option ${c === s.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
-      <div class="row"><span>רמז למתחזה (הנושא)</span><div class="seg"><button data-hint="1" class="${s.hint ? 'on' : ''}">כן</button><button data-hint="0" class="${!s.hint ? 'on' : ''}">לא</button></div></div>
-      <div class="row"><span>מספר מתחזים</span><div class="seg"><button data-imp="1" class="${s.imposters === 1 ? 'on' : ''}">1</button><button data-imp="2" class="${s.imposters === 2 ? 'on' : ''}">2</button></div></div>
-      ${s.imposters === 2 ? '<div class="note">2 מתחזים רק כשיש 6 שחקנים ומעלה</div>' : ''}
-      <button id="startBtn" class="green" ${need > 0 ? 'disabled' : ''}>▶️ מתחילים!</button>
-      ${need > 0 ? `<div class="note">צריך עוד ${need} ${need === 1 ? 'שחקן' : 'שחקנים'} כדי להתחיל (לפחות ${st.minPlayers})</div>` : ''}
-      ${st.players.some(p => p.score) ? '<button class="ghost" id="resetBtn">איפוס ניקוד</button>' : ''}
-    </div>`;
+    h += `<section class="panel" aria-labelledby="hSet"><h2 id="hSet">⚙️ הגדרות</h2>
+      <label for="catSel" class="lbl">נושא המילים</label>
+      <select id="catSel">${st.categories.map(c => `<option value="${esc(c)}" ${c === s.category ? 'selected' : ''}>${c === 'הכול' ? '🎲' : st.catIcons[c]} ${esc(c)}</option>`).join('')}</select>
+      ${radios('hint', 'רמז למתחזה (מה הנושא)', [[1, 'כן'], [0, 'לא']], s.hint ? 1 : 0)}
+      ${radios('pics', 'ציור ליד המילה', [[1, 'כן'], [0, 'לא']], s.pictures !== false ? 1 : 0)}
+      ${radios('imp', 'מספר מתחזים', [[1, '1'], [2, '2']], s.imposters)}
+      ${s.imposters === 2 ? '<p class="note">2 מתחזים רק כשיש 6 שחקנים ומעלה</p>' : ''}
+      <button id="startBtn" class="btn green" ${need > 0 ? 'aria-disabled="true"' : ''} aria-describedby="startNote">▶️ מתחילים!</button>
+      <p class="note" id="startNote">${need > 0 ? `צריך עוד ${need} ${need === 1 ? 'שחקן' : 'שחקנים'} כדי להתחיל (לפחות ${st.minPlayers})` : 'כולם כאן? אפשר להתחיל!'}</p>
+      ${st.players.some(p => p.score) ? '<button class="btn ghost" id="resetBtn">איפוס ניקוד</button>' : ''}
+    </section>`;
   } else {
-    h += `<div class="panel big">⏳ מחכים שהמנהל יתחיל…<div class="note">${need > 0 ? `צריך עוד ${need} ${need === 1 ? 'שחקן' : 'שחקנים'}` : 'כולם מוכנים!'}</div></div>`;
+    h += `<div class="panel big">⏳ מחכים שהמנהל יתחיל…<p class="note">${need > 0 ? `צריך עוד ${need} ${need === 1 ? 'שחקן' : 'שחקנים'}` : 'כולם מוכנים!'}</p></div>`;
   }
-  h += rulesPanel() + `<button class="ghost" id="leaveBtn">${st.isHost ? 'סגירת החדר' : 'יציאה מהמשחק'}</button>`;
+  h += rulesPanel();
+  if (leaveConfirm) {
+    h += `<div class="panel confirm" role="group" aria-labelledby="hLeave"><h2 id="hLeave">${st.isHost ? 'לסגור את החדר לכולם?' : 'לצאת מהמשחק?'}</h2>
+      <div class="row2"><button class="btn pink" id="leaveYes">כן, ${st.isHost ? 'לסגור' : 'לצאת'}</button><button class="btn ghost" id="leaveNo">לא, להישאר</button></div></div>`;
+  } else h += `<button class="btn ghost" id="leaveBtn">${st.isHost ? 'סגירת החדר' : 'יציאה מהמשחק'}</button>`;
   return h;
 }
 
-function cardHtml() {
+function cardHtml(ctx) {
   const c = st.round.card;
-  const back = c.imposter
-    ? `<div class="face back imp"><div class="emoji">🕵️</div><div class="word">אתה המתחזה!</div>
-        ${c.hint ? `<div class="cat">רמז – הנושא: ${esc(c.hint)}</div>` : '<div class="cat">אין רמז – תקשיב/י טוב!</div>'}
-        <p>אל תגלה/י לאף אחד 🤫<br>נסה/י לנחש מה המילה</p></div>`
-    : `<div class="face back"><div class="lbl">המילה הסודית:</div><div class="word">${esc(c.word)}</div>
-        <div class="cat">נושא: ${esc(c.category)}</div><p>אל תגיד/י את המילה בקול! 🤐</p></div>`;
-  return `<div class="cardwrap"><div class="flip ${cardOpen ? 'open' : ''}" data-card="1">
-    <div class="face front"><div class="q">❓</div><p>${cardOpen ? '' : 'לחצו כדי לראות את הקלף'}</p></div>${back}</div></div>
-    <div class="note">${cardOpen ? 'לחצו שוב על הקלף כדי להסתיר' : 'ודאו שאף אחד לא מציץ 👀'}</div>`;
+  let inner;
+  if (!cardOpen) {
+    inner = `<div class="face front"><span class="q" aria-hidden="true">❓</span><p>הקלף מוסתר</p></div>`;
+  } else if (c.imposter) {
+    inner = `<div class="face back imp">
+      <span class="pic" aria-hidden="true">🕵️</span>
+      <p class="word">את/ה המתחזה!</p>
+      ${c.hint ? `<p class="cat">רמז – הנושא: ${c.catIcon ? pic(c.catIcon, '') : ''} <b>${esc(c.hint)}</b></p>
+        <button class="btn small light" id="speak-${ctx}" data-speak="${esc('הנושא הוא ' + c.hint)}">🔊 השמעת הנושא</button>`
+        : '<p class="cat">אין רמז – תקשיבו טוב לאחרים!</p>'}
+      <p>🤫 אל תגלו לאף אחד. נסו לנחש מה המילה.</p></div>`;
+  } else {
+    inner = `<div class="face back">
+      <p class="lbl2">המילה הסודית:</p>
+      ${c.emoji ? pic(c.emoji, 'ציור: ' + c.word, 'pic') : ''}
+      <p class="word">${esc(c.word)}</p>
+      <button class="btn small" id="speak-${ctx}" data-speak="${esc(c.word)}">🔊 השמעת המילה</button>
+      <p class="cat">נושא: ${c.catIcon ? pic(c.catIcon, '') : ''} ${esc(c.category)}</p>
+      <p>🤐 לא אומרים את המילה בקול!</p></div>`;
+  }
+  return `<section class="cardsec" aria-labelledby="hCard-${ctx}">
+    <h2 class="sr-only" id="hCard-${ctx}">הקלף שלי</h2>
+    <div class="card ${cardOpen ? 'open' : ''} ${flipNow ? 'anim' : ''}" id="cardBox-${ctx}" data-card="1">${inner}</div>
+    <button class="btn ${cardOpen ? 'ghost' : 'blue'}" id="cardBtn-${ctx}" data-cardbtn="1" aria-expanded="${cardOpen}" aria-controls="cardBox-${ctx}">
+      ${cardOpen ? '🙈 הסתרת הקלף' : '👁️ הצגת הקלף'}</button>
+    <p class="note">${cardOpen ? '🎧 בהשמעה – קרבו את הטלפון לאוזן כדי שאחרים לא ישמעו' : '👀 ודאו שאף אחד לא מציץ'}</p>
+  </section>`;
+}
+
+function progress(label, v, max) {
+  return `<div class="progress" role="progressbar" aria-label="${label}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${v}" aria-valuetext="${v} מתוך ${max}"><div style="width:${100 * v / max}%"></div></div>
+    <p class="note">${label}: ${v} מתוך ${max}</p>`;
 }
 
 function revealView() {
   const r = st.round;
-  let h = `<p class="sub">סיבוב ${st.roundNo} · כל אחד מסתכל על הקלף שלו</p>${cardHtml()}
-    <div class="progress"><div style="width:${100 * r.seenCount / r.total}%"></div></div>
-    <div class="note">${r.seenCount} מתוך ${r.total} ראו את הקלף</div>`;
-  h += !r.iSeen ? `<button id="seenBtn" class="green">✅ ראיתי, אני מוכן/ה</button>` : `<div class="note">מחכים לשאר השחקנים…</div>`;
-  if (st.isHost) h += `<button class="ghost" id="skipBtn">להמשיך בלי לחכות לכולם</button>`;
+  let h = `<p class="sub">סיבוב ${st.roundNo} · כל אחד מסתכל על הקלף שלו</p>${cardHtml('r')}
+    ${progress('ראו את הקלף', r.seenCount, r.total)}`;
+  h += !r.iSeen ? `<button id="seenBtn" class="btn green">✅ ראיתי, אני מוכן/ה</button>` : `<p class="note">מחכים לשאר השחקנים…</p>`;
+  if (st.isHost) h += `<button class="btn ghost" id="skipBtn">להמשיך בלי לחכות לכולם</button>`;
   return h;
 }
 
 function discussView() {
   const r = st.round;
   return `<div class="starter">🎤 מתחיל/ה: <b>${esc(r.starter)}</b><br>ממשיכים בסיבוב לפי הסדר</div>
-  <div class="panel"><h2>🗣️ זמן לרמזים!</h2>
+  <section class="panel" aria-labelledby="hTips"><h2 id="hTips">🗣️ זמן לרמזים!</h2>
     <ol class="tips">
       <li>כל אחד אומר <b>מילה אחת</b> שקשורה למילה הסודית.</li>
       <li>לא קל מדי – שהמתחזה לא יבין!</li>
       <li>לא קשה מדי – שלא יחשדו בך!</li>
       <li>אפשר לעשות 2–3 סיבובים של רמזים.</li>
-    </ol></div>
-  <details class="panel"><summary>להציץ שוב בקלף שלי</summary>${cardHtml()}</details>
+    </ol></section>
+  <details class="panel" id="peek"><summary>להציץ שוב בקלף שלי</summary>${cardHtml('d')}</details>
   ${guessPanel()}
-  ${st.isHost ? '<button id="voteBtn" class="pink">🗳️ עוברים להצבעה</button>' : '<div class="note">המנהל יעביר להצבעה כשתהיו מוכנים</div>'}`;
+  ${st.isHost ? '<button id="voteBtn" class="btn pink">🗳️ עוברים להצבעה</button>' : '<p class="note">המנהל יעביר להצבעה כשתהיו מוכנים</p>'}`;
 }
 
-let guessDraft = '', guessConfirm = false;
+let guessDraft = '', guessConfirm = false, flipNow = false;
 function guessPanel() {
   if (!st.round.canGuess) return '';
-  return `<div class="panel guess"><h2>🤔 גילית את המילה?</h2>
-    <div class="note" style="margin:0 0 10px">אפשר לנחש <b>פעם אחת</b>: ניחוש נכון – ניצחת! ניחוש לא נכון – השחקנים מנצחים.</div>
-    <input id="guessInput" type="text" maxlength="30" placeholder="המילה היא…" value="${esc(guessDraft)}" autocomplete="off">
+  return `<section class="panel guess" aria-labelledby="hGuess"><h2 id="hGuess">🤔 גילית את המילה?</h2>
+    <p class="note" id="guessHelp">אפשר לנחש <b>פעם אחת</b>: ניחוש נכון – ניצחת! ניחוש לא נכון – השחקנים מנצחים.</p>
+    <label for="guessInput" class="lbl">הניחוש שלי</label>
+    <input id="guessInput" type="text" maxlength="30" autocomplete="off" aria-describedby="guessHelp" value="${esc(guessDraft)}" ${errField === 'guessInput' ? 'aria-invalid="true"' : ''}>
     ${guessConfirm
-      ? `<button id="guessGo" class="pink">✅ בטוח/ה! לשלוח את "${esc(guessDraft)}"</button><button class="ghost" id="guessCancel">רגע, לא בטוח/ה</button>`
-      : `<button id="guessBtn">🎯 אני יודע/ת את המילה!</button>`}
-  </div>`;
+      ? `<p class="confirm-q" id="gq">לשלוח את הניחוש "${esc(guessDraft)}"?</p>
+         <div class="row2"><button id="guessGo" class="btn pink" aria-describedby="gq">✅ כן, לשלוח</button><button class="btn ghost" id="guessCancel">רגע, לא בטוח/ה</button></div>`
+      : `<button id="guessBtn" class="btn">🎯 אני יודע/ת את המילה!</button>`}
+  </section>`;
 }
 
 function voteView() {
   const r = st.round;
-  let h = `<div class="panel"><h2>🗳️ מי ${r.impCount > 1 ? 'אחד המתחזים' : 'המתחזה'}?</h2>
-    <div class="vote-list">${r.candidates.filter(c => c.id !== me).map(c =>
-      `<button data-vote="${c.id}" class="${r.myVote === c.id ? 'sel' : ''}">${avatar(c)} ${esc(c.name)} ${r.myVote === c.id ? ' ✔' : ''}</button>`).join('')}</div>
-    <div class="progress"><div style="width:${100 * r.votedCount / r.total}%"></div></div>
-    <div class="note">${r.votedCount} מתוך ${r.total} הצביעו${r.myVote ? ' · אפשר לשנות עד שכולם מצביעים' : ''}</div></div>`;
+  let h = `<section class="panel" aria-labelledby="hVote"><h2 id="hVote">🗳️ מי ${r.impCount > 1 ? 'אחד המתחזים' : 'המתחזה'}?</h2>
+    <p class="note">בוחרים שחקן אחד. אפשר לשנות עד שכולם מצביעים.</p>
+    <div class="vote-list" role="group" aria-labelledby="hVote">${r.candidates.filter(c => c.id !== me).map(c =>
+      `<button class="vote ${r.myVote === c.id ? 'sel' : ''}" id="vote-${c.id}" data-vote="${c.id}" aria-pressed="${r.myVote === c.id}">
+        ${avatar(c)} <span class="nm">${esc(c.name)}</span> ${r.myVote === c.id ? '<span class="chk">✓ הקול שלי</span>' : ''}</button>`).join('')}</div>
+    ${progress('הצביעו', r.votedCount, r.total)}</section>`;
   h += guessPanel();
-  if (st.isHost) h += `<button class="ghost" id="endVoteBtn">לסיים הצבעה עכשיו</button>`;
+  if (st.isHost) h += `<button class="btn ghost" id="endVoteBtn">לסיים הצבעה עכשיו</button>`;
   return h;
 }
 
@@ -587,26 +720,29 @@ function resultsView() {
   const g = res.guess;
   const title = g ? (g.correct ? '😈 המתחזה ניחש את המילה!' : '🎉 המתחזה טעה בניחוש – השחקנים ניצחו!')
                   : (res.caught ? '🎉 תפסתם את המתחזה!' : '😈 המתחזה ניצח!');
-  let h = `<div class="banner ${res.caught ? 'win' : 'lose'}">${title}</div>
-    <div class="panel big">${win ? '🏆 ניצחת בסיבוב הזה!' : '💪 בפעם הבאה!'}</div>
-    <div class="panel reveal-word">המילה הייתה <b>${esc(r.word)}</b>(${esc(r.category)})
-      <p>🕵️ ${r.imposterNames.length > 1 ? 'המתחזים היו' : 'המתחזה היה/תה'}: <b style="font-size:1.5rem;display:inline;color:var(--pink)">${r.imposterNames.map(esc).join(' ו')}</b></p></div>
-    ${g ? `<div class="panel big">🎯 ${esc(g.name)} ניחש/ה: <b>"${esc(g.text)}"</b> ${g.correct ? '✔' : '✘'}
-        ${g.approved ? '<div class="note">המנהל אישר את הניחוש</div>' : ''}
-        ${st.isHost && !g.correct ? '<button class="ghost" id="approveBtn">זה בעצם נכון (רק שגיאת כתיב) – לאשר</button>' : ''}</div>` : ''}
-    ${g ? '' : `<div class="panel"><h2>תוצאות ההצבעה</h2><ul class="players tally">${res.tally.map(t =>
-      `<li><span class="nm">${t.imposter ? '🕵️ ' : ''}${esc(t.name)}</span><span class="v">${t.votes} קולות</span></li>`).join('')}</ul>
-      ${!res.caught && res.top.length > 1 ? '<div class="note">היה תיקו – אז המתחזה חמק!</div>' : ''}</div>`}
-    <div class="panel"><h2>⭐ ניקוד</h2>${playersList(false)}<div class="note">השחקנים ניצחו = נקודה לכל אחד · המתחזה ניצח = 2 נקודות למתחזה</div></div>`;
-  h += st.isHost ? `<button id="againBtn" class="green">🔄 סיבוב חדש</button><button class="ghost" id="lobbyBtn">חזרה לחדר ההמתנה</button>`
-                 : `<div class="note">מחכים שהמנהל יתחיל סיבוב חדש…</div>`;
+  let h = `<h2 class="banner ${res.caught ? 'win' : 'lose'}">${title}</h2>
+    <p class="panel big">${win ? '🏆 ניצחת בסיבוב הזה!' : '💪 בפעם הבאה!'}</p>
+    <section class="panel reveal-word" aria-labelledby="hWord"><h3 id="hWord" class="lbl2">המילה הייתה</h3>
+      ${st.settings.pictures !== false ? pic(r.emoji, 'ציור: ' + r.word, 'pic sm') : ''}
+      <p class="word2">${esc(r.word)}</p><p>(${esc(r.category)})</p>
+      <button class="btn small ghost inline" id="speak-res" data-speak="${esc(r.word)}">🔊 השמעה</button>
+      <p class="impname">🕵️ ${r.imposterNames.length > 1 ? 'המתחזים היו' : 'המתחזה היה/תה'}: <b>${r.imposterNames.map(esc).join(' ו')}</b></p></section>
+    ${g ? `<section class="panel big" aria-label="הניחוש של המתחזה">🎯 ${esc(g.name)} ניחש/ה: <b>"${esc(g.text)}"</b> – ${g.correct ? '✓ נכון' : '✗ לא נכון'}
+        ${g.approved ? '<p class="note">המנהל אישר את הניחוש</p>' : ''}
+        ${st.isHost && !g.correct ? '<button class="btn ghost" id="approveBtn">זה בעצם נכון (רק שגיאת כתיב) – לאשר</button>' : ''}</section>` : ''}
+    ${g ? '' : `<section class="panel" aria-labelledby="hTally"><h3 id="hTally">תוצאות ההצבעה</h3><ul class="players tally">${res.tally.map(t =>
+      `<li><span class="nm">${t.imposter ? '🕵️ ' : ''}${esc(t.name)}${t.imposter ? ' <span class="tag pinktag">מתחזה</span>' : ''}</span><span class="v">${t.votes} ${t.votes === 1 ? 'קול' : 'קולות'}</span></li>`).join('')}</ul>
+      ${!res.caught && res.top.length > 1 ? '<p class="note">היה תיקו – אז המתחזה חמק!</p>' : ''}</section>`}
+    <section class="panel" aria-labelledby="hScore"><h3 id="hScore">⭐ ניקוד</h3>${playersList(false)}<p class="note">השחקנים ניצחו = נקודה לכל אחד · המתחזה ניצח = 2 נקודות למתחזה</p></section>`;
+  h += st.isHost ? `<button id="againBtn" class="btn green">🔄 סיבוב חדש</button><button class="btn ghost" id="lobbyBtn">חזרה לחדר ההמתנה</button>`
+                 : `<p class="note">מחכים שהמנהל יתחיל סיבוב חדש…</p>`;
   return h;
 }
 
 function rulesPanel() {
-  return `<details class="panel"><summary><b>📖 איך משחקים?</b></summary>
+  return `<details class="panel" id="rules"><summary>📖 איך משחקים?</summary>
   <ol class="tips">
-    <li>כל השחקנים מקבלים את אותה מילה סודית – חוץ מהמתחזה!</li>
+    <li>כל השחקנים מקבלים את אותה מילה סודית (עם ציור והשמעה) – חוץ מהמתחזה!</li>
     <li>המתחזה לא יודע את המילה (אולי רק את הנושא).</li>
     <li>כל אחד בתורו אומר מילה אחת שקשורה למילה הסודית.</li>
     <li>בסוף כולם מצביעים: מי המתחזה?</li>
@@ -615,59 +751,97 @@ function rulesPanel() {
   </ol></details>`;
 }
 
+function footer() {
+  return `<footer class="foot">
+    <details id="a11y"><summary>♿ הצהרת נגישות</summary>
+      <div class="a11y">
+        <p>המשחק תוכנן לעמוד ב-WCAG 2.2 ברמה AA ובתקן הישראלי ת״י 5568:</p>
+        <ul>
+          <li>ניגודיות צבעים של 4.5:1 לפחות, ומידע לא מועבר רק באמצעות צבע.</li>
+          <li>כפתורים גדולים (48 פיקסלים לפחות) ונוחים ללחיצה.</li>
+          <li>תמיכה בקורא מסך: תוויות לכל שדה, הכרזה על שינויים ועל שגיאות.</li>
+          <li>אפשר לשחק עם מקלדת בלבד, והמיקוד נראה בבירור.</li>
+          <li>הגדלת טקסט בכפתור "גודל טקסט" למעלה, וזום של הדפדפן פתוח.</li>
+          <li>ציור והשמעה לכל מילה – גם לילדים שעוד לא קוראים.</li>
+          <li>כיבוד הגדרת "הפחתת תנועה" של המכשיר.</li>
+        </ul>
+        <p>המשחק לא אוסף מידע אישי, ואין בו פרסומות. מצאתם בעיית נגישות? ספרו לנו כדי שנתקן.</p>
+      </div></details>
+    <p>גרסה ${VERSION}</p></footer>`;
+}
+
 function leaveGame() {
   if (role === 'host') {
-    if (!confirmLeave()) return;
     S.order.forEach(pid => { if (pid !== me) pub('s/' + pid, { roomId: S.roomId, closed: true }); });
     pub('meta', '');
     localStorage.removeItem('imp_host_state');
   } else send('leave');
+  leaveConfirm = false;
   setTimeout(() => { leaveLocal(); render(true); }, 300);
-}
-let leaveArmed = 0;
-function confirmLeave() { // אישור בלחיצה כפולה במקום חלון קופץ
-  if (Date.now() - leaveArmed < 3000) return true;
-  leaveArmed = Date.now(); err = 'לחצו שוב כדי לסגור את החדר לכולם'; render(true); return false;
 }
 
 function bind() {
   const $ = id => document.getElementById(id);
   const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
-  const getName = () => { const n = $('nameInput').value.trim(); if (!n) { err = 'צריך לכתוב שם'; render(true); return null; } localStorage.setItem('imp_name', n); return n; };
+  const fail = (msg, fieldId) => { err = msg; errField = fieldId; render(true); const f = $(fieldId); if (f) f.focus(); };
+  const ok = () => { err = ''; errField = null; };
+  const getName = () => {
+    const n = $('nameInput').value.trim();
+    if (!n) { fail('צריך לכתוב שם. כתבו את השם שלכם בשדה "השם שיופיע במשחק".', 'nameInput'); return null; }
+    localStorage.setItem('imp_name', n); return n;
+  };
+  on('sizeBtn', () => { sizeIdx = (sizeIdx + 1) % SIZES.length; localStorage.setItem('imp_size', sizeIdx); applySize(); render(true); announce('גודל טקסט: ' + SIZES[sizeIdx].n); });
   on('joinBtn', () => {
     const n = getName(); if (!n) return;
     const code = ($('codeInput').value || '').replace(/\D/g, '');
-    if (code.length !== 4) { err = 'קוד החדר הוא 4 ספרות'; render(true); return; }
-    err = ''; joinRoom(n, code);
+    if (code.length !== 4) { fail('קוד החדר הוא 4 ספרות. בקשו את הקוד ממי שפתח את החדר.', 'codeInput'); return; }
+    ok(); joinRoom(n, code);
   });
-  on('createBtn', () => { const n = getName(); if (!n) return; err = ''; createRoom(n); });
+  const ci = $('codeInput'); if (ci) ci.onkeydown = e => { if (e.key === 'Enter') $('joinBtn').click(); };
+  on('createBtn', () => { const n = getName(); if (!n) return; ok(); createRoom(n); });
   on('shareBtn', async () => {
     const link = joinLink();
-    try { if (navigator.share) await navigator.share({ title: 'מי המתחזה?', text: 'בואו לשחק! קוד חדר: ' + roomCode, url: link }); else { await navigator.clipboard.writeText(link); err = 'הקישור הועתק ✔'; render(true); } } catch (e) {}
+    try { if (navigator.share) await navigator.share({ title: 'מי המתחזה?', text: 'בואו לשחק! קוד חדר: ' + roomCode, url: link }); else { await navigator.clipboard.writeText(link); announce('הקישור הועתק'); err = ''; status = ''; render(true); } } catch (e) {}
   });
-  on('startBtn', () => send('start'));
+  on('startBtn', () => {
+    if ($('startBtn').getAttribute('aria-disabled') === 'true') { fail(`צריך לפחות ${st.minPlayers} שחקנים כדי להתחיל. שתפו את הקוד עם עוד חברים.`, 'startBtn'); return; }
+    ok(); send('start');
+  });
   on('againBtn', () => send('again'));
   on('lobbyBtn', () => send('lobby'));
   on('resetBtn', () => send('resetScores'));
-  on('leaveBtn', leaveGame);
+  on('leaveBtn', () => { leaveConfirm = true; render(true); const y = $('leaveNo'); if (y) y.focus(); });
+  on('leaveNo', () => { leaveConfirm = false; render(true); const b = $('leaveBtn'); if (b) b.focus(); });
+  on('leaveYes', leaveGame);
   on('seenBtn', () => { cardOpen = false; send('seen'); });
   on('skipBtn', () => send('discuss'));
   on('voteBtn', () => send('toVote'));
   on('endVoteBtn', () => send('endVote'));
   const gi = $('guessInput');
-  if (gi) gi.oninput = () => { guessDraft = gi.value; if (guessConfirm) { guessConfirm = false; render(true); $('guessInput').focus(); } };
-  on('guessBtn', () => { guessDraft = ($('guessInput').value || '').trim(); if (!guessDraft) { err = 'צריך לכתוב ניחוש'; render(true); return; } err = ''; guessConfirm = true; render(true); });
-  on('guessCancel', () => { guessConfirm = false; render(true); });
+  if (gi) {
+    gi.oninput = () => { guessDraft = gi.value; if (guessConfirm) { guessConfirm = false; render(true); $('guessInput').focus(); } };
+    gi.onkeydown = e => { if (e.key === 'Enter' && $('guessBtn')) $('guessBtn').click(); };
+  }
+  on('guessBtn', () => {
+    guessDraft = ($('guessInput').value || '').trim();
+    if (!guessDraft) { fail('צריך לכתוב ניחוש לפני ששולחים.', 'guessInput'); return; }
+    ok(); guessConfirm = true; render(true); $('guessGo').focus();
+  });
+  on('guessCancel', () => { guessConfirm = false; render(true); $('guessInput').focus(); });
   on('guessGo', () => { guessConfirm = false; send('guess', { text: guessDraft }); guessDraft = ''; });
   on('approveBtn', () => send('approveGuess'));
-  document.querySelectorAll('[data-card]').forEach(c => c.onclick = () => { cardOpen = !cardOpen; render(true); });
+  const toggleCard = () => { cardOpen = !cardOpen; flipNow = cardOpen; render(true); flipNow = false; };
+  document.querySelectorAll('[data-cardbtn]').forEach(b => b.onclick = toggleCard);
+  document.querySelectorAll('[data-card]').forEach(c => c.onclick = (e) => { if (!e.target.closest('button')) toggleCard(); });
+  document.querySelectorAll('[data-speak]').forEach(b => b.onclick = (e) => { e.stopPropagation(); speak(b.dataset.speak); });
   document.querySelectorAll('[data-kick]').forEach(b => b.onclick = () => send('kick', { id: b.dataset.kick }));
   document.querySelectorAll('[data-vote]').forEach(b => b.onclick = () => send('vote', { target: b.dataset.vote }));
-  document.querySelectorAll('[data-hint]').forEach(b => b.onclick = () => send('settings', { hint: b.dataset.hint === '1' }));
-  document.querySelectorAll('[data-imp]').forEach(b => b.onclick = () => send('settings', { imposters: +b.dataset.imp }));
+  document.querySelectorAll('input[name=hint]').forEach(i => i.onchange = () => send('settings', { hint: i.value === '1' }));
+  document.querySelectorAll('input[name=pics]').forEach(i => i.onchange = () => send('settings', { pictures: i.value === '1' }));
+  document.querySelectorAll('input[name=imp]').forEach(i => i.onchange = () => send('settings', { imposters: +i.value }));
   const cs = $('catSel'); if (cs) cs.onchange = () => send('settings', { category: cs.value });
   document.querySelectorAll('details').forEach(d => {
-    const k = d.querySelector('summary').textContent;
+    const k = d.id || d.querySelector('summary').textContent;
     if (openDetails.has(k)) d.open = true;
     d.ontoggle = () => d.open ? openDetails.add(k) : openDetails.delete(k);
   });
